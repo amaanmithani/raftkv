@@ -49,9 +49,29 @@ type Node struct {
 }
 
 type envelope struct {
-	m  raft.Message
-	at int
+	m    raft.Message
+	sent int
+	at   int
 }
+
+// InFlight is a message on the wire (for visualisation).
+type InFlight struct {
+	Msg    raft.Message
+	SentAt int
+	DueAt  int
+}
+
+// InFlight returns messages currently in transit.
+func (c *Cluster) InFlight() []InFlight {
+	out := make([]InFlight, 0, len(c.inflight))
+	for _, e := range c.inflight {
+		out = append(out, InFlight{Msg: e.m, SentAt: e.sent, DueAt: e.at})
+	}
+	return out
+}
+
+// Connected reports whether a and b can currently exchange messages.
+func (c *Cluster) Connected(a, b raft.ID) bool { return c.connected(a, b) }
 
 // ApplyFunc observes every applied entry (used by client workloads).
 type ApplyFunc func(node raft.ID, e raft.Entry, cmd kv.Command, res kv.Result, err error)
@@ -240,7 +260,7 @@ func (c *Cluster) process(n *Node) error {
 				c.Dropped++
 				continue
 			}
-			c.inflight = append(c.inflight, envelope{m: m, at: c.Now + 1 + c.rng.Intn(c.cfg.MaxDelay)})
+			c.inflight = append(c.inflight, envelope{m: m, sent: c.Now, at: c.Now + 1 + c.rng.Intn(c.cfg.MaxDelay)})
 		}
 		// 3. Apply.
 		if rd.Snapshot != nil {

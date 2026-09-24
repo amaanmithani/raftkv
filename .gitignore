@@ -1,3 +1,4 @@
 coverage.out
 *.wasm
 /data/
+web/wasm_exec.js
