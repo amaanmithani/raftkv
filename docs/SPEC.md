@@ -13,7 +13,7 @@ WebAssembly. No Raft libraries.
 | G2 | Log replication with the fast-backup optimisation (conflict term/index hints) | log-matching and leader-completeness properties checked after every simulated step |
 | G3 | Snapshots and log compaction, `InstallSnapshot` for lagging followers | a follower 10,000 entries behind catches up via snapshot |
 | G4 | KV state machine (`Get`, `Put`, `Append`) with client sessions: duplicate requests are applied exactly once | retry-after-timeout tests show no double appends |
-| G5 | Linearizable reads through the log (read index optional) | Porcupine finds zero violations over 1,000 randomized fault schedules |
+| G5 | Linearizable reads, served through the log (ReadIndex left for later) | Porcupine finds zero violations over 1,000 randomized fault schedules |
 | G6 | Deterministic simulator: seeded network with drops, delays, reordering, partitions, crashes and restarts from persisted state | the same seed replays the exact same run |
 | G7 | Real deployment mode: one process per node, HTTP transport, file-backed WAL and snapshots, HTTP client API | 3-node local cluster survives `kill -9` of the leader |
 | G8 | Browser visualizer: the simulator compiled to WASM; kill, restart and partition nodes by clicking | runs on GitHub Pages |

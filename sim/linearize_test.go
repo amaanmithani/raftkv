@@ -14,7 +14,7 @@ func TestSchedulesAreLinearizable(t *testing.T) {
 	}
 	for seed := int64(1); seed <= n; seed++ {
 		r := RunSchedule(seed, DefaultSchedule)
-		if !r.Linearizable || r.Invariant != "" {
+		if !r.Linearizable || r.Invariant != "" || r.Inconclusive {
 			t.Fatalf("%s", r)
 		}
 		if r.Completed == 0 {

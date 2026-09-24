@@ -233,8 +233,37 @@ func (n *Node) inLease() bool {
 	return n.cfg.CheckQuorum && n.leader != None && n.electionElapsed < n.cfg.ElectionTick
 }
 
-// Step processes an incoming message.
+// valid rejects messages that can't have come from a correct peer: unknown
+// or self senders, wrong recipient, snapshots without a body, and appends
+// whose entries aren't a contiguous run after PrevIndex with plausible
+// terms. Dropping them keeps a malformed or forged message from panicking
+// the node or being counted as a vote.
+func (n *Node) valid(m Message) bool {
+	if m.From == n.id || m.To != n.id || !slices.Contains(n.peers, m.From) {
+		return false
+	}
+	switch m.Type {
+	case MsgSnap:
+		return m.Snapshot != nil && m.Snapshot.Term <= m.Term
+	case MsgApp:
+		for i, e := range m.Entries {
+			if e.Index != m.PrevIndex+1+uint64(i) || e.Term > m.Term || (i > 0 && e.Term < m.Entries[i-1].Term) ||
+				(i == 0 && e.Term < m.PrevTerm) {
+				return false
+			}
+		}
+	case MsgPreVote, MsgPreVoteResp, MsgVote, MsgVoteResp, MsgAppResp:
+	default:
+		return false
+	}
+	return true
+}
+
+// Step processes an incoming message. Malformed messages are ignored.
 func (n *Node) Step(m Message) {
+	if !n.valid(m) {
+		return
+	}
 	switch {
 	case m.Term > n.term:
 		if (m.Type == MsgPreVote || m.Type == MsgVote) && n.inLease() {

@@ -268,3 +268,31 @@ func TestVotePersistsAcrossCrash(t *testing.T) {
 		}
 	}
 }
+
+// An installed snapshot must replace the whole stored log: a crash right
+// after installing it must not bring back entries from the old history.
+func TestSnapshotInstallDropsStoredSuffix(t *testing.T) {
+	c := cluster(t, 3, 1, nil)
+	n := c.Nodes[3]
+	// Node 3 has a stale branch at term 1, indexes 1..4.
+	n.st.entries = []raft.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3}, {Term: 1, Index: 4}}
+	c.Crash(3)
+	c.Restart(3)
+	n = c.Nodes[3]
+	store := kv.New()
+	n.Raft.Step(raft.Message{Type: raft.MsgSnap, From: 1, To: 3, Term: 3,
+		Snapshot: &raft.Snapshot{Index: 2, Term: 2, Peers: c.IDs, Data: store.Snapshot()}})
+	if err := c.process(n); err != nil {
+		t.Fatal(err)
+	}
+	c.Crash(3)
+	c.Restart(3)
+	for _, e := range c.Nodes[3].Raft.Entries() {
+		if e.Index > 2 && e.Term < 2 {
+			t.Fatalf("stale entry %d@t%d came back after a restart", e.Index, e.Term)
+		}
+	}
+	if err := c.check(); err != nil {
+		t.Fatal(err)
+	}
+}

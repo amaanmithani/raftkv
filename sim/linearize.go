@@ -14,6 +14,7 @@ type ScheduleResult struct {
 	Seed         int64   `json:"seed"`
 	Variant      Variant `json:"variant"`
 	Linearizable bool    `json:"linearizable"`
+	Inconclusive bool    `json:"inconclusive,omitempty"` // checker timed out: neither proven nor refuted
 	Invariant    string  `json:"invariant_violation,omitempty"`
 	Operations   int     `json:"operations"`
 	Completed    int     `json:"completed"`
@@ -24,6 +25,12 @@ type ScheduleResult struct {
 	Steps        int     `json:"steps"`
 	Sent         int     `json:"messages_sent"`
 	Dropped      int     `json:"messages_dropped"`
+	// OpsUnderFault counts completed operations whose call-to-return span
+	// overlapped a tick with an active fault (a partition, a crashed node, or
+	// message loss/duplication). OpsAfterHeal counts those that returned only
+	// after the healing phase began.
+	OpsUnderFault int `json:"ops_under_fault"`
+	OpsAfterHeal  int `json:"ops_after_heal"`
 }
 
 // ScheduleConfig shapes a randomized run.
@@ -34,6 +41,8 @@ type ScheduleConfig struct {
 	FaultSteps   int // steps with faults injected
 	SettleSteps  int // max steps after healing for clients to finish
 	CheckEvery   int
+	// CheckTimeout bounds the Porcupine search per schedule (default 30s).
+	CheckTimeout time.Duration
 }
 
 // DefaultSchedule is the configuration used for the committed results.
@@ -41,12 +50,13 @@ var DefaultSchedule = ScheduleConfig{Nodes: 5, Clients: 6, OpsPerClient: 30, Fau
 
 // Variant records the per-seed randomized cluster settings.
 type Variant struct {
-	PreVote          bool `json:"prevote"`
-	CheckQuorum      bool `json:"check_quorum"`
-	MaxDelay         int  `json:"max_delay"`
-	MaxEntriesPerMsg int  `json:"max_entries_per_msg"`
-	SnapshotEvery    int  `json:"snapshot_every"`
-	FaultGap         int  `json:"max_steps_between_faults"`
+	PreVote          bool    `json:"prevote"`
+	CheckQuorum      bool    `json:"check_quorum"`
+	MaxDelay         int     `json:"max_delay"`
+	MaxEntriesPerMsg int     `json:"max_entries_per_msg"`
+	SnapshotEvery    int     `json:"snapshot_every"`
+	FaultGap         int     `json:"max_steps_between_faults"`
+	DupRate          float64 `json:"duplicate_rate"`
 }
 
 // RunSchedule runs one seeded schedule: a workload under an adversarial
@@ -57,16 +67,31 @@ type Variant struct {
 // CheckQuorum) don't mask bugs in the core algorithm.
 func RunSchedule(seed int64, sc ScheduleConfig) ScheduleResult {
 	vr := rand.New(rand.NewSource(seed * 7919))
-	v := Variant{PreVote: vr.Intn(2) == 0, CheckQuorum: vr.Intn(2) == 0, MaxDelay: 1 + vr.Intn(5),
-		MaxEntriesPerMsg: 1 + vr.Intn(8), SnapshotEvery: 10 + vr.Intn(50), FaultGap: 5 + vr.Intn(30)}
+	v := Variant{PreVote: vr.Intn(2) == 0, CheckQuorum: vr.Intn(2) == 0, MaxDelay: 1 + vr.Intn(4),
+		MaxEntriesPerMsg: 1 + vr.Intn(8), SnapshotEvery: 10 + vr.Intn(50), FaultGap: 5 + vr.Intn(30),
+		DupRate: []float64{0, 0, 0.1, 0.3}[vr.Intn(4)]}
+	if vr.Intn(3) == 0 {
+		v.SnapshotEvery = 1 + vr.Intn(6) // aggressive compaction: snapshots installed constantly
+	}
 	c := New(Config{N: sc.Nodes, Seed: seed, PreVote: v.PreVote, CheckQuorum: v.CheckQuorum,
-		SnapshotEvery: uint64(v.SnapshotEvery), MaxDelay: v.MaxDelay, MaxEntriesPerMsg: v.MaxEntriesPerMsg,
+		SnapshotEvery: uint64(v.SnapshotEvery), MaxDelay: v.MaxDelay, MaxEntriesPerMsg: v.MaxEntriesPerMsg, DupRate: v.DupRate,
 		CheckEvery: sc.CheckEvery})
 	w := NewWorkload(c, sc.Clients, sc.OpsPerClient, []string{"a", "b", "c"})
 	res := ScheduleResult{Seed: seed, Variant: v}
 	rng := c.rng
 	restartAt := map[raft.ID]int{}
+	faultTick := map[int]bool{}
+	dropping := false
 	step := func() bool {
+		active := dropping || len(restartAt) > 0 || c.Partitioned()
+		for _, id := range c.IDs {
+			if !c.Nodes[id].Alive {
+				active = true
+			}
+		}
+		if active {
+			faultTick[c.Now+1] = true
+		}
 		// Iterate in ID order: map order is random and restarts consume the
 		// seeded RNG, so any other order would break exact replay.
 		for _, id := range c.IDs {
@@ -149,14 +174,22 @@ func RunSchedule(seed int64, sc ScheduleConfig) ScheduleResult {
 					}
 				}
 			case 6:
-				c.SetDropRate([]float64{0, 0.05, 0.2, 0.4}[rng.Intn(4)])
+				rate := []float64{0, 0.05, 0.2, 0.4}[rng.Intn(4)]
+				c.SetDropRate(rate)
+				dropping = rate > 0
 			}
 		}
 		if !step() {
-			return finish(res, c, w)
+			return finish(res, c, w, sc.CheckTimeout)
 		}
 	}
 	// Heal everything and let clients finish.
+	healAt := c.Now
+	stats := func(r ScheduleResult) ScheduleResult {
+		r.OpsUnderFault, r.OpsAfterHeal = w.faultStats(faultTick, healAt)
+		return r
+	}
+	dropping = v.DupRate > 0
 	c.Heal()
 	c.SetDropRate(0)
 	for _, id := range c.IDs {
@@ -165,24 +198,25 @@ func RunSchedule(seed int64, sc ScheduleConfig) ScheduleResult {
 	restartAt = map[raft.ID]int{}
 	for i := 0; i < sc.SettleSteps && !w.Idle(); i++ {
 		if !step() {
-			return finish(res, c, w)
+			return stats(finish(res, c, w, sc.CheckTimeout))
 		}
 	}
-	return finish(res, c, w)
+	return stats(finish(res, c, w, sc.CheckTimeout))
 }
 
-func finish(res ScheduleResult, c *Cluster, w *Workload) ScheduleResult {
+func finish(res ScheduleResult, c *Cluster, w *Workload, timeout time.Duration) ScheduleResult {
 	res.Steps, res.Sent, res.Dropped, res.Elections = c.Now, c.Sent, c.Dropped, len(c.leaders)
 	h := w.History()
 	res.Operations, res.Completed = len(h), w.Completed
 	if res.Invariant != "" {
 		return res
 	}
-	out := porcupine.CheckOperationsTimeout(KVModel, h, 30*time.Second)
-	res.Linearizable = out == porcupine.Ok
-	if out == porcupine.Unknown {
-		res.Invariant = "porcupine timed out"
+	if timeout <= 0 {
+		timeout = 30 * time.Second
 	}
+	out := porcupine.CheckOperationsTimeout(KVModel, h, timeout)
+	res.Linearizable = out == porcupine.Ok
+	res.Inconclusive = out == porcupine.Unknown
 	return res
 }
 

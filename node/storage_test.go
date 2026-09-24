@@ -100,3 +100,50 @@ func TestStorageCorruptRecordIsTreatedAsTornTail(t *testing.T) {
 	}
 	_ = r.Close()
 }
+
+func TestStorageZeroFilledTailIsTorn(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, false)
+	_ = s.Save(raft.HardState{Term: 1}, true, nil, ents(1, 1, 2))
+	_ = s.Close()
+	f, _ := os.OpenFile(filepath.Join(dir, "wal"), os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.Write(make([]byte, 4096)) // file grew, data never hit disk
+	_ = f.Close()
+	r, err := Open(dir, false)
+	if err != nil || len(r.Initial().Entries) != 2 {
+		t.Fatalf("zero tail: %v", err)
+	}
+	_ = r.Close()
+}
+
+func TestStorageMidLogCorruptionRefusesToOpen(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, false)
+	_ = s.Save(raft.HardState{Term: 1}, true, nil, ents(1, 1, 2))
+	_ = s.Save(raft.HardState{}, false, nil, ents(1, 3, 3))
+	_ = s.Save(raft.HardState{}, false, nil, ents(1, 4, 4))
+	_ = s.Close()
+	b, _ := os.ReadFile(filepath.Join(dir, "wal"))
+	b[12] ^= 0xFF // corrupt the first record's payload; valid records follow
+	_ = os.WriteFile(filepath.Join(dir, "wal"), b, 0o644)
+	if _, err := Open(dir, false); err == nil {
+		t.Fatal("mid-log corruption must not be silently truncated")
+	}
+}
+
+func TestStorageInstalledSnapshotDropsSuffix(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, true)
+	_ = s.Save(raft.HardState{Term: 1}, true, nil, ents(1, 1, 10))
+	// A snapshot received from a leader (via Save) replaces the log.
+	_ = s.Save(raft.HardState{Term: 2}, true, &raft.Snapshot{Index: 5, Term: 2}, nil)
+	_ = s.Close()
+	r, _ := Open(dir, true)
+	if n := len(r.Initial().Entries); n != 0 {
+		t.Fatalf("installed snapshot kept %d stale entries", n)
+	}
+	if r.Initial().HardState.Term != 2 {
+		t.Fatal("hard state lost")
+	}
+	_ = r.Close()
+}

@@ -106,10 +106,12 @@ func (r Role) String() string {
 var ErrNotLeader = errors.New("raft: not the leader")
 
 // Ready is a batch of work for the driver. The driver must, in order:
-// persist HardState (if HardStateChanged), Snapshot (if non-nil) and Entries
-// (truncating any stored entries at index >= Entries[0].Index first); then
-// send Messages; then apply the Snapshot and CommittedEntries to the state
-// machine; then call Advance.
+// persist HardState (if HardStateChanged), Snapshot (if non-nil; a snapshot
+// in Ready is one received from the leader, and ALL previously stored log
+// entries must be discarded with it: they belong to a history the snapshot
+// replaces) and Entries (truncating any stored entries at index >=
+// Entries[0].Index first); then send Messages; then apply the Snapshot and
+// CommittedEntries to the state machine; then call Advance.
 type Ready struct {
 	HardState        HardState
 	HardStateChanged bool

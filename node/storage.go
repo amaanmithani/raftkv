@@ -3,7 +3,6 @@
 package node
 
 import (
-	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -66,9 +65,17 @@ func Open(dir string, sync bool) (*Storage, error) {
 			s.st.Entries = append(s.st.Entries, e)
 		}
 	}
+	_, statErr := os.Stat(filepath.Join(dir, "wal"))
 	f, err := os.OpenFile(filepath.Join(dir, "wal"), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, err
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		// A new file's directory entry must be durable before anything in
+		// the file (e.g. a vote) is relied on.
+		if err := syncDir(dir, sync); err != nil {
+			return nil, err
+		}
 	}
 	// Drop a torn tail so new records follow the last good one.
 	if err := f.Truncate(good); err != nil {
@@ -85,10 +92,11 @@ func Open(dir string, sync bool) (*Storage, error) {
 func (s *Storage) Initial() raft.InitialState { return s.st }
 
 // Save persists a Ready batch's durable parts. It must complete before the
-// batch's messages are sent.
+// batch's messages are sent. A snapshot here was received from the leader and
+// replaces the whole log: stored entries are discarded with it.
 func (s *Storage) Save(hs raft.HardState, hsChanged bool, snap *raft.Snapshot, entries []raft.Entry) error {
 	if snap != nil {
-		if err := s.SaveSnapshot(snap); err != nil {
+		if err := s.saveSnapshot(snap, false); err != nil {
 			return err
 		}
 	}
@@ -109,7 +117,7 @@ type walRecord struct {
 }
 
 func (s *Storage) appendRecord(rec walRecord) error {
-	payload, err := json.Marshal(rec)
+	payload, err := json.Marshal(rec) // never empty: at least "{}"
 	if err != nil {
 		return err
 	}
@@ -125,8 +133,14 @@ func (s *Storage) appendRecord(rec walRecord) error {
 	return nil
 }
 
-// SaveSnapshot persists a snapshot and compacts the WAL to entries after it.
-func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
+// SaveSnapshot persists a locally taken snapshot (log compaction) and drops
+// the WAL entries it covers.
+func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error { return s.saveSnapshot(snap, true) }
+
+// saveSnapshot writes the snapshot, then rewrites the WAL. keepSuffix keeps
+// entries after the snapshot (compaction); an installed snapshot replaces the
+// whole log, since entries after it may come from a divergent history.
+func (s *Storage) saveSnapshot(snap *raft.Snapshot, keepSuffix bool) error {
 	if err := writeJSON(filepath.Join(s.dir, "snapshot.json"), snap, s.sync); err != nil {
 		return err
 	}
@@ -136,7 +150,7 @@ func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
 	}
 	var keep []raft.Entry
 	for _, e := range entries {
-		if e.Index > snap.Index {
+		if keepSuffix && e.Index > snap.Index {
 			keep = append(keep, e)
 		}
 	}
@@ -148,18 +162,23 @@ func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
 	}
 	old := s.wal
 	s.wal = f
+	restore := func(err error) error {
+		f.Close()
+		s.wal = old
+		return err
+	}
 	if len(keep) > 0 || hs != (raft.HardState{}) {
 		if err := s.appendRecord(walRecord{Entries: keep, HS: &hs}); err != nil {
-			f.Close()
-			s.wal = old
-			return err
+			return restore(err)
 		}
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	if s.sync {
+		if err := f.Sync(); err != nil {
+			return restore(err)
+		}
 	}
 	if err := os.Rename(tmp, filepath.Join(s.dir, "wal")); err != nil {
-		return err
+		return restore(err)
 	}
 	old.Close()
 	return syncDir(s.dir, s.sync)
@@ -173,37 +192,47 @@ func (s *Storage) Close() error { return s.wal.Close() }
 // offset of the end of the last intact record.
 func replayWAL(path string) ([]raft.Entry, raft.HardState, int64, error) {
 	var hs raft.HardState
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, hs, 0, nil
 	}
 	if err != nil {
 		return nil, hs, 0, err
 	}
-	defer f.Close()
-	r := bufio.NewReader(f)
 	var log []raft.Entry
 	var good int64
-	hdr := make([]byte, 8)
 	for {
-		if _, err := io.ReadFull(r, hdr); err != nil {
-			return log, hs, good, nil // clean end or torn header
+		rest := data[good:]
+		if len(rest) == 0 {
+			return log, hs, good, nil
 		}
-		n := binary.LittleEndian.Uint32(hdr[0:4])
-		sum := binary.LittleEndian.Uint32(hdr[4:8])
-		payload := make([]byte, n)
-		if _, err := io.ReadFull(r, payload); err != nil || crc32.Checksum(payload, crcTable) != sum {
-			return log, hs, good, nil // torn or corrupt tail
+		// A record is bad if its header is incomplete, its length is zero or
+		// absurd, its payload is short, or its checksum/JSON is wrong.
+		bad := len(rest) < 8
+		var n uint32
+		if !bad {
+			n = binary.LittleEndian.Uint32(rest[0:4])
+			bad = n == 0 || n > maxRecord || int64(len(rest)) < 8+int64(n)
 		}
 		var rec walRecord
-		if err := json.Unmarshal(payload, &rec); err != nil {
-			return nil, hs, 0, fmt.Errorf("wal: corrupt record at %d: %w", good, err)
+		if !bad {
+			payload := rest[8 : 8+n]
+			bad = crc32.Checksum(payload, crcTable) != binary.LittleEndian.Uint32(rest[4:8]) ||
+				json.Unmarshal(payload, &rec) != nil
+		}
+		if bad {
+			// A torn final write leaves a short or zero-filled tail. Anything
+			// else means records after this one would be silently lost:
+			// refuse to start rather than drop acknowledged data.
+			if tornTail(rest, n) {
+				return log, hs, good, nil
+			}
+			return nil, hs, 0, fmt.Errorf("wal: corrupt record at offset %d with data after it; refusing to truncate", good)
 		}
 		if rec.HS != nil {
 			hs = *rec.HS
 		}
-		batch := rec.Entries
-		if len(batch) > 0 {
+		if batch := rec.Entries; len(batch) > 0 {
 			first := batch[0].Index
 			cut := len(log)
 			for i, e := range log {
@@ -216,6 +245,24 @@ func replayWAL(path string) ([]raft.Entry, raft.HardState, int64, error) {
 		}
 		good += int64(8 + n)
 	}
+}
+
+// maxRecord bounds a single WAL record (a Ready batch).
+const maxRecord = 64 << 20
+
+// tornTail reports whether a bad record at the start of rest can be the
+// remains of an interrupted final write: the claimed record runs to or past
+// the end of the file, or everything left is zero bytes.
+func tornTail(rest []byte, n uint32) bool {
+	if len(rest) < 8 || int64(len(rest)) <= 8+int64(n) {
+		return true
+	}
+	for _, b := range rest {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func readJSON(path string, v any) error {

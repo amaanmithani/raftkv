@@ -139,7 +139,10 @@ func (w *Workload) Tick() {
 			if op != kv.Get {
 				cmd.Value = fmt.Sprintf("%d.%d ", cl.id, cl.seq)
 			}
-			cl.pending = &pending{cmd: cmd, start: w.c.Now}
+			// Calls are stamped 2t+1 and returns 2t, so an operation that
+			// starts in the same tick another returned is strictly after it
+			// (Porcupine treats equal timestamps as concurrent).
+			cl.pending = &pending{cmd: cmd, start: 2*w.c.Now + 1}
 			if cl.target == raft.None {
 				cl.target = w.randomNode()
 			}
@@ -170,7 +173,7 @@ func (w *Workload) onApply(node raft.ID, e raft.Entry, cmd kv.Command, res kv.Re
 		}
 		w.history = append(w.history, porcupine.Operation{ClientId: int(cl.id),
 			Input: KVInput{Op: p.cmd.Op, Key: p.cmd.Key, Value: p.cmd.Value}, Call: int64(p.start),
-			Output: KVOutput{Value: res.Value}, Return: int64(w.c.Now)})
+			Output: KVOutput{Value: res.Value}, Return: int64(2 * w.c.Now)})
 		w.Completed++
 		cl.pending = nil
 	}
@@ -199,4 +202,22 @@ func (w *Workload) History() []porcupine.Operation {
 		}
 	}
 	return h
+}
+
+// faultStats counts completed operations whose [call, return] span touched a
+// fault tick, and those that returned after healing began at healAt.
+func (w *Workload) faultStats(faultTick map[int]bool, healAt int) (under, afterHeal int) {
+	for _, op := range w.history {
+		call, ret := int((op.Call-1)/2), int(op.Return/2)
+		for t := call; t <= ret; t++ {
+			if faultTick[t] {
+				under++
+				break
+			}
+		}
+		if ret > healAt {
+			afterHeal++
+		}
+	}
+	return under, afterHeal
 }

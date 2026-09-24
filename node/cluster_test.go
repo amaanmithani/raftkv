@@ -183,6 +183,14 @@ func TestFollowerRedirectsWithLeaderHint(t *testing.T) {
 			break
 		}
 	}
+	// Wait until the follower has heard from the leader, or its hint is empty.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, _ := tc.servers[follower].Status(); st.Leader == l {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	req, _ := http.NewRequest(http.MethodPut, tc.peers[follower]+"/kv/x", strings.NewReader("1"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -200,3 +208,69 @@ func TestFollowerRedirectsWithLeaderHint(t *testing.T) {
 		t.Fatalf("status: %+v", st)
 	}
 }
+
+func TestClientIDValidationAndStorageFailureHalts(t *testing.T) {
+	tc := newTestCluster(t, 1)
+	l := tc.leader()
+	base := tc.peers[l]
+	req, _ := http.NewRequest(http.MethodPut, base+"/kv/x", strings.NewReader("1"))
+	req.Header.Set("X-Client-ID", "5") // seq missing
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("client id without seq: %d", resp.StatusCode)
+	}
+	// Without a client id the request still works (at-most-once).
+	req, _ = http.NewRequest(http.MethodPut, base+"/kv/x", strings.NewReader("1"))
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("anonymous put: %d", resp.StatusCode)
+	}
+	// Break storage: the next write must fail and the node must halt,
+	// never acknowledging anything it couldn't persist.
+	_ = tc.servers[l].store.wal.Close()
+	req, _ = http.NewRequest(http.MethodPut, base+"/kv/y", strings.NewReader("2"))
+	resp, err = http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatal("acknowledged a write after a storage failure")
+		}
+	}
+	if !tc.servers[l].failed.Load() {
+		t.Fatal("node should have halted on the storage error")
+	}
+}
+
+func TestPeerTokenRequired(t *testing.T) {
+	s, err := New(Config{ID: 1, Peers: map[raft.ID]string{1: "http://127.0.0.1:1"}, Dir: t.TempDir(), PeerToken: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	for token, want := range map[string]int{"": 401, "wrong": 401} {
+		r, _ := http.NewRequest(http.MethodPost, "/raft", strings.NewReader(""))
+		if token != "" {
+			r.Header.Set("X-Raft-Token", token)
+		}
+		rec := &recorder{header: http.Header{}}
+		h.ServeHTTP(rec, r)
+		if rec.code != want {
+			t.Fatalf("token %q: %d", token, rec.code)
+		}
+	}
+	_ = s.store.Close()
+}
+
+type recorder struct {
+	header http.Header
+	code   int
+}
+
+func (r *recorder) Header() http.Header         { return r.header }
+func (r *recorder) Write(b []byte) (int, error) { return len(b), nil }
+func (r *recorder) WriteHeader(c int)           { r.code = c }

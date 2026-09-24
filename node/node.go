@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,8 @@ type Config struct {
 	Logger        *slog.Logger
 	// RequestTimeout bounds how long a client request waits to commit.
 	RequestTimeout time.Duration
+	// PeerToken, if set, must be presented by peers on /raft (X-Raft-Token).
+	PeerToken string
 }
 
 // Server is one raftkv node.
@@ -50,8 +53,8 @@ type Server struct {
 	done    chan struct{}
 	senders map[raft.ID]chan raft.Message
 	waiters map[uint64]*proposal // log index -> proposal waiting on it
-	nextCID atomic.Uint64
 	stopped atomic.Bool
+	failed  atomic.Bool // storage error: loop has exited
 	wg      sync.WaitGroup
 }
 
@@ -70,8 +73,11 @@ type result struct {
 // Errors returned to clients.
 var (
 	ErrNotLeader = errors.New("not the leader")
-	ErrLost      = errors.New("proposal lost to a leadership change; retry")
-	ErrStopped   = errors.New("server stopped")
+	// ErrUnknownOutcome: leadership changed or a snapshot replaced the log
+	// before this node saw the request apply. It may or may not have taken
+	// effect; only a retry with the same X-Client-ID and X-Seq is safe.
+	ErrUnknownOutcome = errors.New("outcome unknown: the request may or may not have been applied; retry only with the same X-Client-ID and X-Seq")
+	ErrStopped        = errors.New("server stopped")
 )
 
 // New opens storage and restores state, but doesn't start the loop.
@@ -120,7 +126,6 @@ func New(cfg Config) (*Server, error) {
 		inbox:  make(chan raft.Message, 4096), props: make(chan *proposal, 1024), statusC: make(chan chan raft.Status),
 		stop: make(chan struct{}), done: make(chan struct{}), senders: map[raft.ID]chan raft.Message{},
 		waiters: map[uint64]*proposal{}}
-	s.nextCID.Store(uint64(time.Now().UnixNano()))
 	return s, nil
 }
 
@@ -149,6 +154,7 @@ func (s *Server) Stop() {
 		close(ch)
 	}
 	s.wg.Wait()
+	s.client.CloseIdleConnections()
 	_ = s.store.Close()
 }
 
@@ -188,9 +194,15 @@ func (s *Server) loop() {
 			}
 		}
 		if err := s.handleReady(); err != nil {
-			s.cfg.Logger.Error("fatal storage error; stopping", "err", err)
-			go s.Stop()
-			<-s.stop
+			// Never retry a failed write or fsync (the page cache may lie
+			// about what reached disk): fail everything and halt the node.
+			s.cfg.Logger.Error("fatal storage error; node halted", "err", err)
+			for _, p := range s.waiters {
+				p.res <- result{err: ErrStopped}
+			}
+			s.waiters = map[uint64]*proposal{}
+			s.failed.Store(true)
+			return
 		}
 	}
 }
@@ -225,7 +237,7 @@ func (s *Server) handleReady() error {
 			}
 			for idx, p := range s.waiters {
 				if idx <= rd.Snapshot.Index {
-					p.res <- result{err: ErrLost}
+					p.res <- result{err: ErrUnknownOutcome}
 					delete(s.waiters, idx)
 				}
 			}
@@ -235,7 +247,7 @@ func (s *Server) handleReady() error {
 			if p, ok := s.waiters[e.Index]; ok {
 				delete(s.waiters, e.Index)
 				if p.term != e.Term {
-					p.res <- result{err: ErrLost}
+					p.res <- result{err: ErrUnknownOutcome}
 				} else {
 					p.res <- result{val: res, err: err}
 				}
@@ -259,7 +271,7 @@ func (s *Server) handleReady() error {
 			if idx <= st.Commit {
 				continue
 			}
-			p.res <- result{err: ErrLost}
+			p.res <- result{err: ErrUnknownOutcome}
 			delete(s.waiters, idx)
 		}
 	}
@@ -286,7 +298,15 @@ func (s *Server) sendLoop(base string, ch chan raft.Message) {
 		if err := gob.NewEncoder(&buf).Encode(batch); err != nil {
 			continue
 		}
-		resp, err := s.client.Post(base+"/raft", "application/octet-stream", &buf)
+		req, err := http.NewRequest(http.MethodPost, base+"/raft", &buf)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+		if s.cfg.PeerToken != "" {
+			req.Header.Set("X-Raft-Token", s.cfg.PeerToken)
+		}
+		resp, err := s.client.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -300,7 +320,7 @@ func (s *Server) Status() (raft.Status, error) {
 	select {
 	case s.statusC <- c:
 		return <-c, nil
-	case <-s.stop:
+	case <-s.done:
 		return raft.Status{}, ErrStopped
 	}
 }
@@ -314,12 +334,21 @@ func (s *Server) Do(ctx context.Context, cmd kv.Command) (kv.Result, error) {
 	case s.props <- p:
 	case <-s.stop:
 		return kv.Result{}, ErrStopped
+	case <-s.done:
+		return kv.Result{}, ErrStopped
 	case <-ctx.Done():
 		return kv.Result{}, ctx.Err()
 	}
 	select {
 	case r := <-p.res:
 		return r.val, r.err
+	case <-s.done: // loop exited; a queued proposal will never be answered
+		select {
+		case r := <-p.res:
+			return r.val, r.err
+		default:
+			return kv.Result{}, ErrStopped
+		}
 	case <-ctx.Done():
 		return kv.Result{}, ctx.Err()
 	}
@@ -330,6 +359,10 @@ func (s *Server) Do(ctx context.Context, cmd kv.Command) (kv.Result, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /raft", func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.PeerToken != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Raft-Token")), []byte(s.cfg.PeerToken)) != 1 {
+			http.Error(w, "bad peer token", http.StatusUnauthorized)
+			return
+		}
 		var batch []raft.Message
 		if err := gob.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&batch); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -367,13 +400,17 @@ func (s *Server) Handler() http.Handler {
 				}
 				cmd.Value = string(b)
 			}
-			// Clients that retry must send a stable (client id, seq) pair to
-			// get exactly-once semantics; otherwise each call is fresh.
-			if cid, err := strconv.ParseUint(r.Header.Get("X-Client-ID"), 10, 64); err == nil && cid != 0 {
-				seq, _ := strconv.ParseUint(r.Header.Get("X-Seq"), 10, 64)
+			// Exactly-once retries need a stable (client id, seq) from the
+			// client. Without them a request is at-most-once per attempt and
+			// is not recorded in the session table.
+			if h := r.Header.Get("X-Client-ID"); h != "" {
+				cid, err1 := strconv.ParseUint(h, 10, 64)
+				seq, err2 := strconv.ParseUint(r.Header.Get("X-Seq"), 10, 64)
+				if err1 != nil || err2 != nil || cid == 0 || seq == 0 {
+					respondJSON(w, http.StatusBadRequest, map[string]string{"error": "X-Client-ID and X-Seq must be positive integers"})
+					return
+				}
 				cmd.ClientID, cmd.Seq = cid, seq
-			} else {
-				cmd.ClientID, cmd.Seq = s.nextCID.Add(1), 1
 			}
 			res, err := s.Do(r.Context(), cmd)
 			switch {
@@ -385,8 +422,8 @@ func (s *Server) Handler() http.Handler {
 				}
 				w.Header().Set("X-Raft-Leader", hint)
 				respondJSON(w, http.StatusMisdirectedRequest, map[string]string{"error": "not the leader", "leader": hint})
-			case errors.Is(err, ErrLost), errors.Is(err, context.DeadlineExceeded):
-				respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			case errors.Is(err, ErrUnknownOutcome), errors.Is(err, context.DeadlineExceeded):
+				respondJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrUnknownOutcome.Error()})
 			case err != nil:
 				respondJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			default:

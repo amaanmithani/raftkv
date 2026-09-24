@@ -22,6 +22,7 @@ type Config struct {
 	PreVote          bool
 	CheckQuorum      bool
 	DropRate         float64 // probability a message is lost
+	DupRate          float64 // probability a message is delivered twice
 	MaxDelay         int     // messages take 1..MaxDelay ticks
 	SnapshotEvery    uint64  // compact when this many entries applied since the last snapshot (0 = never)
 	MaxEntriesPerMsg int     // raft append batch size (0 = raft default)
@@ -72,6 +73,9 @@ func (c *Cluster) InFlight() []InFlight {
 
 // Connected reports whether a and b can currently exchange messages.
 func (c *Cluster) Connected(a, b raft.ID) bool { return c.connected(a, b) }
+
+// maxInflight caps messages in transit across the whole simulated network.
+const maxInflight = 20_000
 
 // ApplyFunc observes every applied entry (used by client workloads).
 type ApplyFunc func(node raft.ID, e raft.Entry, cmd kv.Command, res kv.Result, err error)
@@ -165,6 +169,9 @@ func (c *Cluster) Partition(groups ...[]raft.ID) {
 	}
 }
 
+// Partitioned reports whether any partition is in effect.
+func (c *Cluster) Partitioned() bool { return len(c.group) > 0 }
+
 // Heal removes all partitions.
 func (c *Cluster) Heal() { c.group = map[raft.ID]int{} }
 
@@ -240,8 +247,10 @@ func (c *Cluster) process(n *Node) error {
 			n.st.hs = rd.HardState
 		}
 		if rd.Snapshot != nil {
+			// An installed snapshot replaces the whole log: stored entries
+			// after it come from a divergent history (see raft.Ready).
 			n.st.snap = rd.Snapshot
-			n.st.entries = trimTo(n.st.entries, rd.Snapshot.Index)
+			n.st.entries = nil
 		}
 		if len(rd.Entries) > 0 {
 			first := rd.Entries[0].Index
@@ -256,11 +265,22 @@ func (c *Cluster) process(n *Node) error {
 		// 2. Send.
 		for _, m := range rd.Messages {
 			c.Sent++
+			// A finite network: when the in-flight queue is full, messages are
+			// dropped, as a switch would. Also bounds memory when a buggy node
+			// floods the network.
+			if len(c.inflight) >= maxInflight {
+				c.Dropped++
+				continue
+			}
 			if c.rng.Float64() < c.cfg.DropRate {
 				c.Dropped++
 				continue
 			}
 			c.inflight = append(c.inflight, envelope{m: m, sent: c.Now, at: c.Now + 1 + c.rng.Intn(c.cfg.MaxDelay)})
+			if c.cfg.DupRate > 0 && c.rng.Float64() < c.cfg.DupRate {
+				// A duplicate, possibly arriving much later (e.g. a retransmit).
+				c.inflight = append(c.inflight, envelope{m: m, sent: c.Now, at: c.Now + 1 + c.rng.Intn(4*c.cfg.MaxDelay)})
+			}
 		}
 		// 3. Apply.
 		if rd.Snapshot != nil {
@@ -309,10 +329,32 @@ func trimTo(es []raft.Entry, idx uint64) []raft.Entry {
 	return out
 }
 
+// termsMonotonic reports whether a log's terms never decrease, starting from
+// the snapshot's term. Any decrease means entries from different histories
+// were spliced together.
+func termsMonotonic(snapTerm uint64, es []raft.Entry) bool {
+	prev := snapTerm
+	for _, e := range es {
+		if e.Term < prev {
+			return false
+		}
+		prev = e.Term
+	}
+	return true
+}
+
 // check verifies Raft's safety properties (Figure 3 of the paper).
 func (c *Cluster) check() error {
 	for _, id := range c.IDs {
 		n := c.Nodes[id]
+		var snapTerm uint64
+		if n.st.snap != nil {
+			snapTerm = n.st.snap.Term
+		}
+		// Persisted state must be a single coherent history, crashed or not.
+		if !termsMonotonic(snapTerm, n.st.entries) {
+			return fmt.Errorf("persisted log of node %d splices histories (terms decrease) (seed %d, t=%d)", id, c.cfg.Seed, c.Now)
+		}
 		if !n.Alive {
 			continue
 		}

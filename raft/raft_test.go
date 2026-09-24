@@ -200,3 +200,51 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatal("empty ready")
 	}
 }
+
+func TestStepDropsMalformedMessages(t *testing.T) {
+	n := newNode(1, []ID{1, 2, 3}, InitialState{HardState: HardState{Term: 1}}, nil)
+	bad := []Message{
+		{Type: MsgSnap, From: 2, To: 1, Term: 2},                                                    // no snapshot body: used to panic
+		{Type: MsgApp, From: 2, To: 1, Term: 2, Entries: []Entry{{Index: 5, Term: 2}}},              // not contiguous: used to panic
+		{Type: MsgApp, From: 2, To: 1, Term: 2, Entries: []Entry{{Index: 1, Term: 9}}},              // entry term above message term
+		{Type: MsgApp, From: 2, To: 1, Term: 2, PrevTerm: 2, Entries: []Entry{{Index: 1, Term: 1}}}, // term below prev
+		{Type: MsgVoteResp, From: 9, To: 1, Term: 1, Granted: true},                                 // not a peer
+		{Type: MsgVoteResp, From: 1, To: 1, Term: 1, Granted: true},                                 // from self
+		{Type: MsgApp, From: 2, To: 3, Term: 2},                                                     // not for us
+		{Type: MsgType(99), From: 2, To: 1, Term: 2},
+	}
+	for i, m := range bad {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("message %d panicked: %v", i, r)
+				}
+			}()
+			n.Step(m)
+		}()
+		if st := n.Status(); st.Term != 1 || st.Leader != None {
+			t.Fatalf("message %d changed state: %+v", i, st)
+		}
+	}
+	// Forged votes from non-peers can't elect a candidate.
+	n.Campaign()
+	for _, from := range []ID{7, 8, 9} {
+		n.Step(Message{Type: MsgVoteResp, From: from, To: 1, Term: 2, Granted: true})
+	}
+	if n.Status().Role == Leader {
+		t.Fatal("elected by forged votes")
+	}
+}
+
+func TestLeaderStepsDownOnHigherTermResponse(t *testing.T) {
+	n := newNode(1, []ID{1, 2, 3}, InitialState{}, nil)
+	n.Campaign()
+	n.Step(Message{Type: MsgVoteResp, From: 2, To: 1, Term: 1, Granted: true})
+	if n.Status().Role != Leader {
+		t.Fatal("setup: not leader")
+	}
+	n.Step(Message{Type: MsgAppResp, From: 3, To: 1, Term: 5})
+	if st := n.Status(); st.Role != Follower || st.Term != 5 {
+		t.Fatalf("leader must step down on a higher-term response: %+v", st)
+	}
+}

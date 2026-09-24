@@ -1,8 +1,8 @@
 {
   "what": "does the harness detect injected consensus bugs?",
   "schedules_per_mutation": 300,
-  "caught": 6,
-  "total": 6,
+  "caught": 10,
+  "total": 11,
   "date": "2026-09-24",
   "mutations": [
     {
@@ -10,10 +10,11 @@
       "bug": "Voters skip the up-to-date log check (\u00a75.4.1)",
       "caught": true,
       "caught_by_randomized_harness": true,
-      "failing_schedules": 136,
+      "failing_schedules": 138,
       "of": 300,
+      "inconclusive_checks": 0,
       "first_failing_seed": 1,
-      "randomized_failure": "leader completeness: leader 4 (term 4) lacks committed entry 1 (seed 1, t=56)",
+      "randomized_failure": "leader completeness: leader 2 (term 6) lacks committed entry 41 (seed 1, t=129)",
       "caught_by_scenario_tests": []
     },
     {
@@ -21,10 +22,11 @@
       "bug": "A node may vote for several candidates in one term",
       "caught": true,
       "caught_by_randomized_harness": true,
-      "failing_schedules": 226,
+      "failing_schedules": 218,
       "of": 300,
-      "first_failing_seed": 4,
-      "randomized_failure": "election safety: nodes 1 and 4 both led term 1 (seed 4, t=21)",
+      "inconclusive_checks": 0,
+      "first_failing_seed": 1,
+      "randomized_failure": "election safety: nodes 1 and 3 both led term 6 (seed 1, t=131)",
       "caught_by_scenario_tests": [
         "TestVotePersistsAcrossCrash"
       ]
@@ -36,6 +38,7 @@
       "caught_by_randomized_harness": false,
       "failing_schedules": 0,
       "of": 300,
+      "inconclusive_checks": 0,
       "first_failing_seed": null,
       "randomized_failure": null,
       "caught_by_scenario_tests": [
@@ -49,6 +52,7 @@
       "caught_by_randomized_harness": false,
       "failing_schedules": 0,
       "of": 300,
+      "inconclusive_checks": 0,
       "first_failing_seed": null,
       "randomized_failure": null,
       "caught_by_scenario_tests": [
@@ -62,6 +66,7 @@
       "caught_by_randomized_harness": false,
       "failing_schedules": 0,
       "of": 300,
+      "inconclusive_checks": 0,
       "first_failing_seed": null,
       "randomized_failure": null,
       "caught_by_scenario_tests": [
@@ -73,11 +78,80 @@
       "bug": "The state machine re-executes retried requests",
       "caught": true,
       "caught_by_randomized_harness": true,
-      "failing_schedules": 247,
+      "failing_schedules": 248,
       "of": 300,
+      "inconclusive_checks": 0,
       "first_failing_seed": 1,
       "randomized_failure": "non-linearizable history",
       "caught_by_scenario_tests": []
+    },
+    {
+      "mutation": "stale-suffix-on-install",
+      "bug": "Installing a snapshot keeps the old log suffix in storage (found by review)",
+      "caught": true,
+      "caught_by_randomized_harness": true,
+      "failing_schedules": 36,
+      "of": 300,
+      "inconclusive_checks": 0,
+      "first_failing_seed": 4,
+      "randomized_failure": "persisted log of node 3 splices histories (terms decrease) (seed 4, t=468)",
+      "caught_by_scenario_tests": [
+        "TestSnapshotInstallDropsStoredSuffix"
+      ]
+    },
+    {
+      "mutation": "leader-ignores-higher-term",
+      "bug": "A leader keeps leading after an append response shows a higher term (found by review)",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": 0,
+      "of": 300,
+      "inconclusive_checks": 0,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestLeaderStepsDownOnHigherTermResponse"
+      ]
+    },
+    {
+      "mutation": "send-before-persist",
+      "bug": "Real server sends messages before persisting the Ready batch",
+      "caught": false,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": null,
+      "of": null,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [],
+      "layer": "real server"
+    },
+    {
+      "mutation": "wal-drops-entries",
+      "bug": "Real server's WAL never stores log entries",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": null,
+      "of": null,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestClusterSurvivesLeaderCrashAndRestart"
+      ],
+      "layer": "real server"
+    },
+    {
+      "mutation": "install-keeps-wal-suffix",
+      "bug": "Real server keeps the stale WAL suffix when installing a snapshot (found by review)",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": null,
+      "of": null,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestStorageInstalledSnapshotDropsSuffix"
+      ],
+      "layer": "real server"
     }
   ]
 }

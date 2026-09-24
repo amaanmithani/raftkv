@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Throughput and latency vs cluster size (3/5/7), real processes on one
-# machine, fsync on. Writes results/throughput.json.
+# machine, fsync on and off, closed-loop clients. Writes results/throughput.json.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DUR=${DUR:-20s} CLIENTS=${CLIENTS:-"32 128"} SIZES=${SIZES:-"3 5 7"}

@@ -29,9 +29,10 @@ func main() {
 	data := flag.String("data", "", "data directory (default ./data/<id>)")
 	tick := flag.Duration("tick", 50*time.Millisecond, "raft tick interval")
 	nosync := flag.Bool("nosync", false, "skip fsync (benchmarks only: loses durability)")
+	token := flag.String("peer-token", os.Getenv("RAFTKV_PEER_TOKEN"), "shared secret peers must present on /raft")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	if err := run(raft.ID(*id), *peers, *data, *tick, !*nosync, logger); err != nil {
+	if err := run(raft.ID(*id), *peers, *data, *tick, !*nosync, *token, logger); err != nil {
 		logger.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -53,7 +54,7 @@ func parsePeers(s string) (map[raft.ID]string, error) {
 	return out, nil
 }
 
-func run(id raft.ID, peerList, data string, tick time.Duration, sync bool, logger *slog.Logger) error {
+func run(id raft.ID, peerList, data string, tick time.Duration, sync bool, token string, logger *slog.Logger) error {
 	peers, err := parsePeers(peerList)
 	if err != nil {
 		return err
@@ -69,7 +70,7 @@ func run(id raft.ID, peerList, data string, tick time.Duration, sync bool, logge
 	if err != nil {
 		return err
 	}
-	s, err := node.New(node.Config{ID: id, Peers: peers, Dir: data, Tick: tick, Sync: sync, Logger: logger})
+	s, err := node.New(node.Config{ID: id, Peers: peers, Dir: data, Tick: tick, Sync: sync, Logger: logger, PeerToken: token})
 	if err != nil {
 		return err
 	}
