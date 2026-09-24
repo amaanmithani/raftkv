@@ -169,16 +169,23 @@ func (s *Server) loop() {
 		case m := <-s.inbox:
 			s.raft.Step(m)
 		case p := <-s.props:
-			idx, term, err := s.raft.Propose(p.cmd.Encode())
-			if err != nil {
-				p.res <- result{err: ErrNotLeader}
-				continue
-			}
-			p.index, p.term = idx, term
-			s.waiters[idx] = p
+			s.propose(p)
 		case c := <-s.statusC:
 			c <- s.raft.Status()
 			continue
+		}
+		// Group commit: absorb everything already queued before persisting,
+		// so concurrent proposals share one WAL record and one fsync.
+	drain:
+		for i := 0; i < 1024; i++ {
+			select {
+			case m := <-s.inbox:
+				s.raft.Step(m)
+			case p := <-s.props:
+				s.propose(p)
+			default:
+				break drain
+			}
 		}
 		if err := s.handleReady(); err != nil {
 			s.cfg.Logger.Error("fatal storage error; stopping", "err", err)
@@ -186,6 +193,16 @@ func (s *Server) loop() {
 			<-s.stop
 		}
 	}
+}
+
+func (s *Server) propose(p *proposal) {
+	idx, term, err := s.raft.Propose(p.cmd.Encode())
+	if err != nil {
+		p.res <- result{err: ErrNotLeader}
+		return
+	}
+	p.index, p.term = idx, term
+	s.waiters[idx] = p
 }
 
 func (s *Server) handleReady() error {

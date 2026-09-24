@@ -13,7 +13,7 @@
       "failing_schedules": 136,
       "of": 300,
       "first_failing_seed": 1,
-      "randomized_failure": "leader completeness: leader 4 (term 4) lacks committed entry 2 (seed 1, t=56)",
+      "randomized_failure": "leader completeness: leader 4 (term 4) lacks committed entry 1 (seed 1, t=56)",
       "caught_by_scenario_tests": []
     },
     {

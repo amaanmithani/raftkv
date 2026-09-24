@@ -1,0 +1,228 @@
+{
+  "what": "write throughput and latency vs cluster size",
+  "method": "all nodes and the load generator on one machine (localhost HTTP); 32 and 128 concurrent clients (one run each), sequential PUTs of 64-byte values over 1,000 keys for 20s after a 3s warm-up; each request commits through the log; fsync on = the WAL record for each batch is fsynced before messages are sent (group commit). On macOS Go's File.Sync is F_FULLFSYNC, a full flush of the drive cache, much slower than Linux fdatasync",
+  "machine": {
+    "cpu": "Apple M1 Pro",
+    "cores": 8,
+    "os": "macOS-26.6.2-arm64-arm-64bit"
+  },
+  "date": "2026-09-24",
+  "runs": [
+    {
+      "nodes": 3,
+      "fsync": "on",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 118.402,
+        "ops": 11728,
+        "ops_per_sec": 586.39027814762,
+        "p50_ms": 53.768,
+        "p99_ms": 104.931,
+        "read_pct": 0,
+        "redirects": 32,
+        "seconds": 20.000331583,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 3,
+      "fsync": "on",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 122.838,
+        "ops": 44044,
+        "ops_per_sec": 2201.9883108628405,
+        "p50_ms": 54.387,
+        "p99_ms": 105.001,
+        "read_pct": 0,
+        "redirects": 128,
+        "seconds": 20.001922709,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 3,
+      "fsync": "off",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 57.555,
+        "ops": 293063,
+        "ops_per_sec": 14653.061165816684,
+        "p50_ms": 1.711,
+        "p99_ms": 16.592,
+        "read_pct": 0,
+        "redirects": 0,
+        "seconds": 20.00012125,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 3,
+      "fsync": "off",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 43.785,
+        "ops": 443751,
+        "ops_per_sec": 22187.467213012962,
+        "p50_ms": 4.133,
+        "p99_ms": 20.692,
+        "read_pct": 0,
+        "redirects": 0,
+        "seconds": 20.000074625,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 5,
+      "fsync": "on",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 150.241,
+        "ops": 9774,
+        "ops_per_sec": 488.6827006323976,
+        "p50_ms": 63.52,
+        "p99_ms": 122.174,
+        "read_pct": 0,
+        "redirects": 32,
+        "seconds": 20.000708,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 5,
+      "fsync": "on",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 152.427,
+        "ops": 35328,
+        "ops_per_sec": 1766.3070849171588,
+        "p50_ms": 66.601,
+        "p99_ms": 135.572,
+        "read_pct": 0,
+        "redirects": 111,
+        "seconds": 20.001052083,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 5,
+      "fsync": "off",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 40.992,
+        "ops": 197748,
+        "ops_per_sec": 9887.042933399278,
+        "p50_ms": 2.529,
+        "p99_ms": 22.707,
+        "read_pct": 0,
+        "redirects": 32,
+        "seconds": 20.000722292,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 5,
+      "fsync": "off",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 50.494,
+        "ops": 318513,
+        "ops_per_sec": 15925.557200981912,
+        "p50_ms": 5.8,
+        "p99_ms": 28.927,
+        "read_pct": 0,
+        "redirects": 121,
+        "seconds": 20.000116541,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 7,
+      "fsync": "on",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 167.937,
+        "ops": 8669,
+        "ops_per_sec": 433.41457195608353,
+        "p50_ms": 71.159,
+        "p99_ms": 147.179,
+        "read_pct": 0,
+        "redirects": 32,
+        "seconds": 20.001634834,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 7,
+      "fsync": "on",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 198.302,
+        "ops": 30200,
+        "ops_per_sec": 1509.9192287582566,
+        "p50_ms": 76.581,
+        "p99_ms": 174.232,
+        "read_pct": 0,
+        "redirects": 128,
+        "seconds": 20.001069875,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 7,
+      "fsync": "off",
+      "result": {
+        "clients": 32,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 44.03,
+        "ops": 184537,
+        "ops_per_sec": 9226.757732422677,
+        "p50_ms": 2.645,
+        "p99_ms": 27.659,
+        "read_pct": 0,
+        "redirects": 32,
+        "seconds": 20.0002,
+        "value_bytes": 64
+      }
+    },
+    {
+      "nodes": 7,
+      "fsync": "off",
+      "result": {
+        "clients": 128,
+        "error_kinds": {},
+        "errors": 0,
+        "max_ms": 54.747,
+        "ops": 243608,
+        "ops_per_sec": 12180.328745076842,
+        "p50_ms": 8.461,
+        "p99_ms": 33.337,
+        "read_pct": 0,
+        "redirects": 122,
+        "seconds": 20.000117,
+        "value_bytes": 64
+      }
+    }
+  ]
+}

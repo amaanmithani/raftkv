@@ -20,12 +20,12 @@ import (
 //
 // Layout in Dir:
 //
-//	state.json     hard state (term, vote, commit), replaced atomically
 //	snapshot.json  latest snapshot, replaced atomically
-//	wal            append-only records; each record is a batch of entries
-//	               starting at some index. Replay truncates the log at a
-//	               record's first index, so overwriting a conflicting suffix
-//	               needs no in-place edits.
+//	wal            append-only records. A record carries a batch of entries
+//	               (replay truncates the log at the batch's first index, so
+//	               overwriting a conflicting suffix needs no in-place edits)
+//	               and/or the hard state (last one wins). One Ready batch is
+//	               one record and one fsync: group commit.
 //
 // Every WAL record is length-prefixed and CRC32-checked; a torn final record
 // (crash mid-write) is detected and discarded on open.
@@ -45,9 +45,6 @@ func Open(dir string, sync bool) (*Storage, error) {
 		return nil, err
 	}
 	s := &Storage{dir: dir, sync: sync}
-	if err := readJSON(filepath.Join(dir, "state.json"), &s.st.HardState); err != nil {
-		return nil, err
-	}
 	var snap raft.Snapshot
 	if err := readJSON(filepath.Join(dir, "snapshot.json"), &snap); err != nil {
 		return nil, err
@@ -55,10 +52,11 @@ func Open(dir string, sync bool) (*Storage, error) {
 	if snap.Index > 0 {
 		s.st.Snapshot = &snap
 	}
-	entries, good, err := replayWAL(filepath.Join(dir, "wal"))
+	entries, hs, good, err := replayWAL(filepath.Join(dir, "wal"))
 	if err != nil {
 		return nil, err
 	}
+	s.st.HardState = hs
 	var snapIdx uint64
 	if s.st.Snapshot != nil {
 		snapIdx = s.st.Snapshot.Index
@@ -94,21 +92,24 @@ func (s *Storage) Save(hs raft.HardState, hsChanged bool, snap *raft.Snapshot, e
 			return err
 		}
 	}
-	if len(entries) > 0 {
-		if err := s.appendRecord(entries); err != nil {
-			return err
-		}
+	if len(entries) == 0 && !hsChanged {
+		return nil
 	}
+	rec := walRecord{Entries: entries}
 	if hsChanged {
-		if err := writeJSON(filepath.Join(s.dir, "state.json"), hs, s.sync); err != nil {
-			return err
-		}
+		rec.HS = &hs
 	}
-	return nil
+	return s.appendRecord(rec)
 }
 
-func (s *Storage) appendRecord(entries []raft.Entry) error {
-	payload, err := json.Marshal(entries)
+// walRecord is one WAL record.
+type walRecord struct {
+	Entries []raft.Entry    `json:"e,omitempty"`
+	HS      *raft.HardState `json:"h,omitempty"`
+}
+
+func (s *Storage) appendRecord(rec walRecord) error {
+	payload, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
@@ -129,7 +130,7 @@ func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
 	if err := writeJSON(filepath.Join(s.dir, "snapshot.json"), snap, s.sync); err != nil {
 		return err
 	}
-	entries, _, err := replayWAL(filepath.Join(s.dir, "wal"))
+	entries, hs, _, err := replayWAL(filepath.Join(s.dir, "wal"))
 	if err != nil {
 		return err
 	}
@@ -147,8 +148,8 @@ func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
 	}
 	old := s.wal
 	s.wal = f
-	if len(keep) > 0 {
-		if err := s.appendRecord(keep); err != nil {
+	if len(keep) > 0 || hs != (raft.HardState{}) {
+		if err := s.appendRecord(walRecord{Entries: keep, HS: &hs}); err != nil {
 			f.Close()
 			s.wal = old
 			return err
@@ -168,15 +169,16 @@ func (s *Storage) SaveSnapshot(snap *raft.Snapshot) error {
 func (s *Storage) Close() error { return s.wal.Close() }
 
 // replayWAL reads every intact record, applying truncate-then-append
-// semantics. It returns the entries and the byte offset of the end of the
-// last intact record.
-func replayWAL(path string) ([]raft.Entry, int64, error) {
+// semantics. It returns the entries, the latest hard state and the byte
+// offset of the end of the last intact record.
+func replayWAL(path string) ([]raft.Entry, raft.HardState, int64, error) {
+	var hs raft.HardState
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, 0, nil
+		return nil, hs, 0, nil
 	}
 	if err != nil {
-		return nil, 0, err
+		return nil, hs, 0, err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
@@ -185,18 +187,22 @@ func replayWAL(path string) ([]raft.Entry, int64, error) {
 	hdr := make([]byte, 8)
 	for {
 		if _, err := io.ReadFull(r, hdr); err != nil {
-			return log, good, nil // clean end or torn header
+			return log, hs, good, nil // clean end or torn header
 		}
 		n := binary.LittleEndian.Uint32(hdr[0:4])
 		sum := binary.LittleEndian.Uint32(hdr[4:8])
 		payload := make([]byte, n)
 		if _, err := io.ReadFull(r, payload); err != nil || crc32.Checksum(payload, crcTable) != sum {
-			return log, good, nil // torn or corrupt tail
+			return log, hs, good, nil // torn or corrupt tail
 		}
-		var batch []raft.Entry
-		if err := json.Unmarshal(payload, &batch); err != nil {
-			return nil, 0, fmt.Errorf("wal: corrupt record at %d: %w", good, err)
+		var rec walRecord
+		if err := json.Unmarshal(payload, &rec); err != nil {
+			return nil, hs, 0, fmt.Errorf("wal: corrupt record at %d: %w", good, err)
 		}
+		if rec.HS != nil {
+			hs = *rec.HS
+		}
+		batch := rec.Entries
 		if len(batch) > 0 {
 			first := batch[0].Index
 			cut := len(log)
