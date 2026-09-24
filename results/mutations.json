@@ -1,0 +1,83 @@
+{
+  "what": "does the harness detect injected consensus bugs?",
+  "schedules_per_mutation": 300,
+  "caught": 6,
+  "total": 6,
+  "date": "2026-09-24",
+  "mutations": [
+    {
+      "mutation": "vote-ignores-log",
+      "bug": "Voters skip the up-to-date log check (\u00a75.4.1)",
+      "caught": true,
+      "caught_by_randomized_harness": true,
+      "failing_schedules": 136,
+      "of": 300,
+      "first_failing_seed": 1,
+      "randomized_failure": "leader completeness: leader 4 (term 4) lacks committed entry 2 (seed 1, t=56)",
+      "caught_by_scenario_tests": []
+    },
+    {
+      "mutation": "double-vote",
+      "bug": "A node may vote for several candidates in one term",
+      "caught": true,
+      "caught_by_randomized_harness": true,
+      "failing_schedules": 226,
+      "of": 300,
+      "first_failing_seed": 4,
+      "randomized_failure": "election safety: nodes 1 and 4 both led term 1 (seed 4, t=21)",
+      "caught_by_scenario_tests": [
+        "TestVotePersistsAcrossCrash"
+      ]
+    },
+    {
+      "mutation": "commit-old-term",
+      "bug": "Leader commits earlier-term entries by counting replicas (Figure 8 bug)",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": 0,
+      "of": 300,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestFigure8"
+      ]
+    },
+    {
+      "mutation": "follower-over-commits",
+      "bug": "Follower commits up to the leader's index without checking its log matches that far",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": 0,
+      "of": 300,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestFollowerCommitsOnlyVerifiedPrefix"
+      ]
+    },
+    {
+      "mutation": "forget-vote-on-crash",
+      "bug": "The vote isn't persisted, so a restarted node can vote twice in a term",
+      "caught": true,
+      "caught_by_randomized_harness": false,
+      "failing_schedules": 0,
+      "of": 300,
+      "first_failing_seed": null,
+      "randomized_failure": null,
+      "caught_by_scenario_tests": [
+        "TestVotePersistsAcrossCrash"
+      ]
+    },
+    {
+      "mutation": "no-dedup",
+      "bug": "The state machine re-executes retried requests",
+      "caught": true,
+      "caught_by_randomized_harness": true,
+      "failing_schedules": 247,
+      "of": 300,
+      "first_failing_seed": 1,
+      "randomized_failure": "non-linearizable history",
+      "caught_by_scenario_tests": []
+    }
+  ]
+}
