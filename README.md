@@ -12,6 +12,16 @@ WebAssembly, in the browser.
 
 ![Visualizer: a write replicates, the leader crashes, a new leader is elected, the crashed node restarts and catches up](docs/img/demo.gif)
 
+## Screenshots
+
+![The WebAssembly visualizer mid-run: node 4 crashed, node 5 elected leader in term 3, append messages in flight, city = Pune applied on the live nodes](docs/img/visualizer.png)
+
+The WASM visualizer (`web/`, built as in `web/README.md` and served locally), stopped at tick 64: `city = Pune` was committed, node 4 (the leader) was crashed, node 5 won the election in term 3, and a new write (`city = Delhi`) is replicating.
+
+![Terminal: curl against a local 3-node cluster, a follower answering 421 with X-Raft-Leader, writes to the leader, the leader killed, a new leader elected with the data intact](docs/img/cluster.svg)
+
+Three real `raftkv` processes on one laptop, started as in [Run it](#run-it): a follower redirects a write with `421` and `X-Raft-Leader`, the leader takes the writes, then the leader process is killed and the survivors elect a new leader that still has the data.
+
 ## How it's built
 
 ```
