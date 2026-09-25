@@ -1,5 +1,7 @@
 # raftkv
 
+> **Credits.** Built by Amaan Mithani with Claude (Anthropic) as the AI coding assistant.
+
 [![CI](https://github.com/amaanmithani/raftkv/actions/workflows/ci.yml/badge.svg)](https://github.com/amaanmithani/raftkv/actions/workflows/ci.yml)
 
 A replicated key-value store on a **from-scratch implementation of Raft**, with no
