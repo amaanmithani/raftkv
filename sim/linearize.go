@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/anishathalye/porcupine"
 	"github.com/amaanmithani/raftkv/raft"
+	"github.com/anishathalye/porcupine"
 )
 
 // ScheduleResult summarises one randomized fault schedule.

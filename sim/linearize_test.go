@@ -3,8 +3,8 @@ package sim
 import (
 	"testing"
 
-	"github.com/anishathalye/porcupine"
 	"github.com/amaanmithani/raftkv/kv"
+	"github.com/anishathalye/porcupine"
 )
 
 func TestSchedulesAreLinearizable(t *testing.T) {

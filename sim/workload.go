@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/anishathalye/porcupine"
 	"github.com/amaanmithani/raftkv/kv"
 	"github.com/amaanmithani/raftkv/raft"
+	"github.com/anishathalye/porcupine"
 )
 
 // KVInput and KVOutput are the Porcupine operation payloads.
